@@ -10,6 +10,18 @@
 </head>
 <body>
 
+<!-- Password lock overlay -->
+<div id="lock-screen" class="lock-screen" hidden>
+  <form id="lock-form" class="lock-box">
+    <h2>Moj raspored</h2>
+    <input id="lock-input" type="password" placeholder="Šifra" autocomplete="off" autofocus>
+    <button type="submit">Otključaj</button>
+    <p id="lock-error" class="lock-error" hidden></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+
 <header class="topbar">
   <h1>Moj raspored</h1>
   <div class="topbar-actions">
@@ -21,7 +33,8 @@
 
 <nav class="tabs">
   <button class="tab active" data-tab="plan">Plan</button>
-  <button class="tab" data-tab="inbox">Inbox</button>
+  <button class="tab" data-tab="raspored">Raspored</button>
+  <button class="tab" data-tab="zadaci">Zadaci</button>
   <button class="tab" data-tab="preferences">Preferencije</button>
   <button class="tab" data-tab="context">Kontekst</button>
 </nav>
@@ -33,30 +46,42 @@
     <h2 id="plan-title">Plan</h2>
     <span class="muted" id="plan-updated"></span>
   </div>
-  <article id="plan-content" class="markdown">Učitavanje…</article>
+  <article id="plan-content" class="card markdown">Učitavanje…</article>
 </section>
 
-<section id="tab-inbox" class="pane">
+<section id="tab-raspored" class="pane">
   <div class="pane-head">
-    <h2>Inbox</h2>
+    <h2>Raspored</h2>
+    <span class="muted" id="raspored-date"></span>
   </div>
-  <form id="inbox-form" class="inbox-form">
-    <input id="inbox-input" placeholder="Novi zadatak…" autocomplete="off">
-    <select id="inbox-tag">
+  <div class="timeline-wrap card">
+    <div id="timeline" class="timeline" role="list" aria-label="Dnevni raspored"></div>
+  </div>
+  <div id="raspored-popover" class="popover" hidden>
+    <h4 id="pop-title"></h4>
+    <p class="muted" id="pop-time"></p>
+    <p id="pop-cat"></p>
+  </div>
+</section>
+
+<section id="tab-zadaci" class="pane">
+  <div class="pane-head"><h2>Zadaci</h2></div>
+  <form id="zadaci-form" class="zadaci-form card">
+    <input id="zadaci-input" placeholder="Novi zadatak…" autocomplete="off">
+    <select id="zadaci-tag">
       <option value="@hitno">@hitno</option>
       <option value="@danas">@danas</option>
       <option value="@sutra" selected>@sutra</option>
       <option value="@tjedan">@tjedan</option>
-      <option value="@kasnije">@kasnije</option>
     </select>
     <button type="submit">Dodaj</button>
   </form>
-  <ul id="inbox-list" class="tasklist"></ul>
+  <ul id="zadaci-list" class="tasklist"></ul>
 </section>
 
 <section id="tab-preferences" class="pane">
   <div class="pane-head"><h2>Preferencije</h2></div>
-  <textarea id="preferences-editor" spellcheck="false"></textarea>
+  <textarea id="preferences-editor" class="card" spellcheck="false"></textarea>
   <div class="pane-actions">
     <button id="preferences-save">Spremi</button>
     <span class="muted" id="preferences-status"></span>
@@ -65,31 +90,43 @@
 
 <section id="tab-context" class="pane">
   <div class="pane-head"><h2>Kontekst</h2><span class="muted" id="context-size"></span></div>
-  <article id="context-content" class="markdown"></article>
+  <article id="context-content" class="card markdown"></article>
 </section>
 
 </main>
 
 <dialog id="settings-dialog">
-  <form method="dialog">
+  <form id="settings-form" method="dialog">
     <h3>Postavke</h3>
-    <label>
-      GitHub token
-      <input id="token-input" type="password" autocomplete="off" placeholder="ghp_…">
-    </label>
-    <label>
-      Repo (owner/name)
-      <input id="repo-input" placeholder="matijawork/matijawork.github.io">
-    </label>
-    <label>
-      Grana
-      <input id="branch-input" placeholder="main" value="main">
-    </label>
+
+    <fieldset>
+      <legend>Promjena šifre</legend>
+      <label>Stara šifra<input id="pw-old" type="password" autocomplete="current-password"></label>
+      <label>Nova šifra<input id="pw-new" type="password" autocomplete="new-password"></label>
+      <label>Potvrdi novu<input id="pw-confirm" type="password" autocomplete="new-password"></label>
+      <button type="button" id="pw-save">Promijeni šifru</button>
+      <span class="muted small" id="pw-status"></span>
+    </fieldset>
+
+    <fieldset>
+      <legend>GitHub token</legend>
+      <label>Token<input id="token-input" type="password" autocomplete="off" placeholder="ghp_…"></label>
+      <button type="button" id="token-save">Ažuriraj token</button>
+      <span class="muted small" id="token-status"></span>
+      <p class="muted small">Fine-grained PAT, scope: Contents R/W za <code>matijawork/matijawork.github.io</code>.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Održavanje</legend>
+      <button type="button" id="clear-cache">Obriši cache (token ostaje)</button>
+      <button type="button" id="clear-all">Obriši sve (token + šifra)</button>
+    </fieldset>
+
+    <p class="muted small version">Verzija: <span id="app-version"></span></p>
+
     <div class="dialog-actions">
-      <button value="save">Spremi</button>
-      <button value="cancel">Otkaži</button>
+      <button value="close">Zatvori</button>
     </div>
-    <p class="muted small">Token ostaje samo na ovom uređaju (localStorage). Treba `repo` scope.</p>
   </form>
 </dialog>
 

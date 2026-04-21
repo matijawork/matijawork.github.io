@@ -17,5 +17,4 @@ Taggaj svaki zadatak jednim od: `@hitno`, `@danas`, `@sutra`, `@tjedan`, `@kasni
 
 ## Aktivni zadaci
 
-- [ ] @tjedan sadsa
 &amp;amp;amp;lt;!-- dodaj ovdje --&amp;amp;amp;gt;

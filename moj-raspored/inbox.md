@@ -20,5 +20,5 @@ Taggaj svaki zadatak jednim od: `@hitno`, `@danas`, `@sutra`, `@tjedan`, `@kasni
 
 ## Aktivni zadaci
 
-- [ ] @sutra kkkk
+- [ ] @sutra sadasdas
 &lt;!-- dodaj ovdje --&gt;

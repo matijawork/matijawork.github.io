@@ -661,12 +661,42 @@ function setupScrollSpy() {
 
 // ---------- SW ----------
 
-function registerSW() {
+async function registerSW() {
+  console.log('[mr-boot] protocol:', location.protocol, 'origin:', location.origin, 'token len:', state.token?.length || 0);
+
+  if (location.protocol === 'file:') {
+    toastErr('Otvaraš s file:// — GitHub API blokiran. Otvori https://matijawork.github.io/moj-raspored/');
+    console.error('[mr-boot] file:// protocol → fetch ce failati (Failed to fetch). Otvori kroz https.');
+    return;
+  }
+
   if (!('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.register('sw.js').catch(() => {});
-  navigator.serviceWorker.getRegistrations().then(regs => {
-    regs.forEach(r => r.update());
-  }).catch(() => {});
+
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    console.log('[mr-boot] SW registrations found:', regs.length);
+    for (const r of regs) {
+      const scriptURL = r.active?.scriptURL || r.installing?.scriptURL || r.waiting?.scriptURL;
+      console.log('[mr-boot] SW scope:', r.scope, 'script:', scriptURL);
+    }
+    const params = new URLSearchParams(location.search);
+    if (params.get('nuke') === '1') {
+      console.warn('[mr-boot] NUKE mode: unregister all SWs + clear caches');
+      await Promise.all(regs.map(r => r.unregister()));
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+      toast('SW + cache obrisani — reload za 1s', 'info');
+      setTimeout(() => location.replace(location.pathname), 1000);
+      return;
+    }
+  } catch (e) {
+    console.error('[mr-boot] SW introspection fail:', e);
+  }
+
+  navigator.serviceWorker.register('sw.js').then(r => {
+    console.log('[mr-boot] SW register OK, scope:', r.scope);
+    r.update().catch(() => {});
+  }).catch(e => console.error('[mr-boot] SW register fail:', e));
 }
 
 // ---------- Init ----------

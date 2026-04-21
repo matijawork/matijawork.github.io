@@ -4,7 +4,7 @@
 // - Optimistic UI
 // - Google Calendar timeline za Raspored
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 
 const LS_KEYS = {
   token:  'mr.token',
@@ -47,26 +47,52 @@ function esc(s) { return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 function b64encode(str) { return btoa(unescape(encodeURIComponent(str))); }
 function b64decode(b64) { return decodeURIComponent(escape(atob(b64))); }
 
-// ---------- Crypto ----------
+// ---------- Crypto / password ----------
+
+const DEBUG_AUTH = true;
+function dlog(...a) { if (DEBUG_AUTH) console.log('[auth]', ...a); }
 
 async function sha256Hex(s) {
+  if (typeof s !== 'string') {
+    dlog('sha256Hex got non-string:', typeof s, s);
+    s = String(s ?? '');
+  }
   const buf = new TextEncoder().encode(s);
   const hash = await crypto.subtle.digest('SHA-256', buf);
-  return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2,'0')).join('');
+  const hex = [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2,'0')).join('');
+  dlog('sha256Hex input len:', s.length, '→', hex.slice(0,12) + '…');
+  return hex;
+}
+
+async function setDefaultPwHash() {
+  const h = await sha256Hex('1');
+  saveLS(LS_KEYS.pwhash, h);
+  dlog('default pw hash set');
+  return h;
 }
 
 async function ensureDefaultPwHash() {
-  if (!localStorage.getItem(LS_KEYS.pwhash)) {
-    saveLS(LS_KEYS.pwhash, await sha256Hex('1'));
-  }
+  const cur = localStorage.getItem(LS_KEYS.pwhash);
+  dlog('ensureDefaultPwHash, existing:', cur ? cur.slice(0,12)+'…' : '(none)');
+  if (!cur) await setDefaultPwHash();
 }
 
 async function verifyPassword(pw) {
-  return (await sha256Hex(pw)) === localStorage.getItem(LS_KEYS.pwhash);
+  const stored = localStorage.getItem(LS_KEYS.pwhash);
+  if (!stored) {
+    dlog('verifyPassword: no stored hash');
+    return false;
+  }
+  const typed = await sha256Hex(pw ?? '');
+  const ok = typed === stored;
+  dlog('verify stored:', stored.slice(0,12)+'…', 'typed:', typed.slice(0,12)+'…', 'match:', ok);
+  return ok;
 }
 
 async function setPassword(newPw) {
-  saveLS(LS_KEYS.pwhash, await sha256Hex(newPw));
+  const h = await sha256Hex(newPw);
+  saveLS(LS_KEYS.pwhash, h);
+  dlog('setPassword stored:', h.slice(0,12)+'…');
 }
 
 // ---------- Status dot ----------
@@ -580,6 +606,7 @@ function openSettings(msg) {
 }
 
 async function handlePwChange() {
+  dlog('handlePwChange clicked');
   const oldPw = $('pw-old').value;
   const newPw = $('pw-new').value;
   const conf  = $('pw-confirm').value;
@@ -587,12 +614,23 @@ async function handlePwChange() {
   s.style.color = '';
   if (!newPw) { s.style.color = 'var(--danger)'; s.textContent = 'nova šifra prazna'; return; }
   if (newPw !== conf) { s.style.color = 'var(--danger)'; s.textContent = 'potvrda ne odgovara'; return; }
-  if (!await verifyPassword(oldPw)) { s.style.color = 'var(--danger)'; s.textContent = 'stara šifra pogrešna'; return; }
+  const oldOk = await verifyPassword(oldPw);
+  if (!oldOk) { s.style.color = 'var(--danger)'; s.textContent = 'stara šifra pogrešna'; return; }
   await setPassword(newPw);
+  const verifyAfter = await verifyPassword(newPw);
+  dlog('post-setPassword verify(newPw):', verifyAfter);
+  if (!verifyAfter) { s.style.color = 'var(--danger)'; s.textContent = 'pohrana nije uspjela'; return; }
   s.style.color = 'var(--success)';
   s.textContent = 'šifra promijenjena';
   $('pw-old').value = ''; $('pw-new').value = ''; $('pw-confirm').value = '';
   setTimeout(() => s.textContent = '', 2500);
+}
+
+async function handlePwReset() {
+  if (!confirm('Resetirati šifru na default "1"? Ostali podaci ostaju.')) return;
+  await setDefaultPwHash();
+  showToast('Šifra resetirana na "1". Reload…');
+  setTimeout(() => location.reload(), 600);
 }
 
 function handleTokenSave() {
@@ -647,9 +685,9 @@ function showToast(msg) {
 // ---------- Lock screen ----------
 
 async function unlockApp() {
+  dlog('unlockApp() → show app');
   $('lock-screen').hidden = true;
   $('app').hidden = false;
-  sessionStorage.setItem('mr.auth', '1');
   refreshDot();
   if (!state.token) {
     openSettings('Unesi GitHub token (prvi put).');
@@ -665,25 +703,30 @@ async function handleLockSubmit(e) {
   const pw = $('lock-input').value;
   const errEl = $('lock-error');
   errEl.hidden = true;
-  if (await verifyPassword(pw)) {
-    await unlockApp();
-  } else {
-    errEl.textContent = 'Pogrešna šifra';
+  dlog('handleLockSubmit pw len:', pw.length);
+  try {
+    const ok = await verifyPassword(pw);
+    if (ok) {
+      await unlockApp();
+    } else {
+      errEl.textContent = 'Pogrešna šifra';
+      errEl.hidden = false;
+      $('lock-input').value = '';
+      $('lock-input').focus();
+    }
+  } catch (err) {
+    console.error('[auth] unlock error', err);
+    errEl.textContent = 'Greška: ' + (err.message || err);
     errEl.hidden = false;
-    $('lock-input').value = '';
-    $('lock-input').focus();
   }
 }
 
 async function initAuth() {
+  dlog('initAuth start');
   await ensureDefaultPwHash();
-  if (sessionStorage.getItem('mr.auth') === '1') {
-    await unlockApp();
-  } else {
-    $('lock-screen').hidden = false;
-    $('app').hidden = true;
-    $('lock-input').focus();
-  }
+  $('lock-screen').hidden = false;
+  $('app').hidden = true;
+  setTimeout(() => $('lock-input').focus(), 0);
 }
 
 // ---------- Service worker ----------
@@ -714,6 +757,7 @@ function bindEvents() {
     await addTask(text, tag);
   });
   $('pw-save').addEventListener('click', handlePwChange);
+  $('pw-reset').addEventListener('click', handlePwReset);
   $('token-save').addEventListener('click', handleTokenSave);
   $('clear-cache').addEventListener('click', handleClearCache);
   $('clear-all').addEventListener('click', handleClearAll);
@@ -725,6 +769,15 @@ function bindEvents() {
   });
 }
 
-bindEvents();
-initAuth();
-registerSW();
+function boot() {
+  try { bindEvents(); }
+  catch (e) { console.error('[boot] bindEvents failed', e); }
+  initAuth().catch(e => console.error('[boot] initAuth failed', e));
+  registerSW();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}

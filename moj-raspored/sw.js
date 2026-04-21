@@ -1,16 +1,21 @@
-// Moj raspored — service worker (cache-first za app shell)
-const CACHE = 'mr-v1';
+// Moj raspored — service worker
+// v2: network-first za app shell (HTML/CSS/JS) → uvijek svježa verzija nakon deploya,
+// cache je samo offline fallback. Bump CACHE ime kad god mijenjaš strategiju.
+const CACHE = 'mr-v2';
 const SHELL = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './manifest.webmanifest',
-  'https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js',
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches.open(CACHE)
+      .then(c => c.addAll(SHELL).catch(() => {}))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -23,14 +28,19 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  // Never cache GitHub API (always fresh)
   if (url.host === 'api.github.com') return;
-  // Cache-first za shell, network-first za sve ostalo
-  if (SHELL.some(p => e.request.url.endsWith(p.replace('./','')) || e.request.url === p)) {
-    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
-    return;
-  }
+  if (e.request.method !== 'GET') return;
+
+  // Network-first, cache fallback (applies to HTML/JS/CSS/shell)
   e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request))
+    fetch(e.request)
+      .then(res => {
+        if (res && res.ok && url.origin === location.origin) {
+          const clone = res.clone();
+          caches.open(CACHE).then(c => c.put(e.request, clone)).catch(() => {});
+        }
+        return res;
+      })
+      .catch(() => caches.match(e.request))
   );
 });

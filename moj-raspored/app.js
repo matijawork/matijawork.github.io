@@ -1,16 +1,24 @@
-// Moj raspored — frontend v2
-// - SHA-256 password lock
-// - GitHub sync s fresh SHA + 409 retry, queue samo na network error
-// - Optimistic UI
-// - Google Calendar timeline za Raspored
+// Moj raspored — frontend v2.2.0
+// - SHA-256 + salt password (migrates from unsalted v2.1.0)
+// - Rate limit: 5 failed unlocks / 60s → 30s lockout
+// - Per-path write mutex → zero races → no 409 under normal use
+// - Fresh SHA fetch + 409 retry for each PUT
+// - Unified sync() → single write path for every file
+// - Toast stack (error/success/info), top progress bar, empty states
+// - Single-scroll layout: Raspored → Danas → Zadaci; Preferences/Context/Settings as modals
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
+const DEBUG = true;
+const dlog = (...a) => { if (DEBUG) console.log('[mr]', ...a); };
+const derr = (...a) => console.error('[mr]', ...a);
 
-const LS_KEYS = {
-  token:  'mr.token',
-  pwhash: 'mr.pwhash',
-  queue:  'mr.queue',
-  shas:   'mr.shas',
+const LS = {
+  token:    'mr.token',
+  pwhash:   'mr.pwhash',
+  salt:     'mr.salt',
+  fails:    'mr.unlockFails',
+  lockout:  'mr.lockoutUntil',
+  queue:    'mr.queue',
 };
 
 const FIXED_REPO   = 'matijawork/matijawork.github.io';
@@ -28,71 +36,170 @@ const TIMELINE_END_H   = 23;
 const PX_PER_MIN       = 1;
 
 const state = {
-  token:  localStorage.getItem(LS_KEYS.token) || '',
-  queue:  JSON.parse(localStorage.getItem(LS_KEYS.queue) || '[]'),
-  shas:   JSON.parse(localStorage.getItem(LS_KEYS.shas)  || '{}'),
+  token:  localStorage.getItem(LS.token) || '',
+  queue:  JSON.parse(localStorage.getItem(LS.queue) || '[]'),
   cache:  {},
   pollTimer: null,
   online: navigator.onLine,
   nowTimer: null,
+  syncCount: 0,
 };
 
 const $ = id => document.getElementById(id);
-const saveLS = (k, v) => localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
-
-function esc(s) { return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const save = (k, v) => localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
+const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 // ---------- Base64 UTF-8 safe ----------
+const b64enc = s => btoa(unescape(encodeURIComponent(s)));
+const b64dec = b => decodeURIComponent(escape(atob(b)));
 
-function b64encode(str) { return btoa(unescape(encodeURIComponent(str))); }
-function b64decode(b64) { return decodeURIComponent(escape(atob(b64))); }
-
-// ---------- Crypto / password ----------
-
-const DEBUG_AUTH = true;
-function dlog(...a) { if (DEBUG_AUTH) console.log('[auth]', ...a); }
+// ---------- Crypto / password with salt ----------
 
 async function sha256Hex(s) {
-  if (typeof s !== 'string') {
-    dlog('sha256Hex got non-string:', typeof s, s);
-    s = String(s ?? '');
-  }
+  if (typeof s !== 'string') s = String(s ?? '');
   const buf = new TextEncoder().encode(s);
   const hash = await crypto.subtle.digest('SHA-256', buf);
-  const hex = [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2,'0')).join('');
-  dlog('sha256Hex input len:', s.length, '→', hex.slice(0,12) + '…');
-  return hex;
+  return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2,'0')).join('');
 }
 
-async function setDefaultPwHash() {
-  const h = await sha256Hex('1');
-  saveLS(LS_KEYS.pwhash, h);
-  dlog('default pw hash set');
-  return h;
+function genSalt() {
+  const a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return [...a].map(b => b.toString(16).padStart(2,'0')).join('');
 }
 
-async function ensureDefaultPwHash() {
-  const cur = localStorage.getItem(LS_KEYS.pwhash);
-  dlog('ensureDefaultPwHash, existing:', cur ? cur.slice(0,12)+'…' : '(none)');
-  if (!cur) await setDefaultPwHash();
+async function hashWithSalt(pw, salt) {
+  return sha256Hex(salt + '::' + pw);
 }
 
-async function verifyPassword(pw) {
-  const stored = localStorage.getItem(LS_KEYS.pwhash);
-  if (!stored) {
-    dlog('verifyPassword: no stored hash');
-    return false;
+async function ensureSaltAndDefault() {
+  let salt = localStorage.getItem(LS.salt);
+  const stored = localStorage.getItem(LS.pwhash);
+  if (!salt && !stored) {
+    salt = genSalt();
+    save(LS.salt, salt);
+    save(LS.pwhash, await hashWithSalt('1', salt));
+    dlog('init: salt + default "1" created');
+  } else if (!salt && stored) {
+    dlog('legacy unsalted hash detected; will migrate on next successful unlock');
+  } else if (salt && !stored) {
+    save(LS.pwhash, await hashWithSalt('1', salt));
+    dlog('init: pwhash missing, reset to default "1"');
   }
-  const typed = await sha256Hex(pw ?? '');
-  const ok = typed === stored;
-  dlog('verify stored:', stored.slice(0,12)+'…', 'typed:', typed.slice(0,12)+'…', 'match:', ok);
-  return ok;
+}
+
+async function resetToDefault() {
+  const salt = genSalt();
+  save(LS.salt, salt);
+  save(LS.pwhash, await hashWithSalt('1', salt));
+  clearFailures();
+  dlog('reset to default "1" with fresh salt');
 }
 
 async function setPassword(newPw) {
-  const h = await sha256Hex(newPw);
-  saveLS(LS_KEYS.pwhash, h);
-  dlog('setPassword stored:', h.slice(0,12)+'…');
+  let salt = localStorage.getItem(LS.salt);
+  if (!salt) { salt = genSalt(); save(LS.salt, salt); }
+  save(LS.pwhash, await hashWithSalt(newPw, salt));
+  dlog('setPassword stored');
+}
+
+async function verifyPassword(pw) {
+  const stored = localStorage.getItem(LS.pwhash);
+  if (!stored) return false;
+  const salt = localStorage.getItem(LS.salt);
+  if (salt) {
+    return (await hashWithSalt(pw, salt)) === stored;
+  }
+  // Legacy: unsalted (v2.1.0 install)
+  const legacy = await sha256Hex(pw);
+  if (legacy === stored) {
+    // upgrade: salt + rehash
+    const newSalt = genSalt();
+    save(LS.salt, newSalt);
+    save(LS.pwhash, await hashWithSalt(pw, newSalt));
+    dlog('legacy password upgraded to salted');
+    return true;
+  }
+  return false;
+}
+
+// ---------- Rate limit ----------
+
+function getLockoutSeconds() {
+  const until = Number(localStorage.getItem(LS.lockout) || 0);
+  const rem = until - Date.now();
+  return rem > 0 ? Math.ceil(rem / 1000) : 0;
+}
+
+function recordFailure() {
+  const now = Date.now();
+  const arr = (JSON.parse(localStorage.getItem(LS.fails) || '[]')).filter(t => now - t < 60_000);
+  arr.push(now);
+  save(LS.fails, arr);
+  if (arr.length >= 5) {
+    save(LS.lockout, now + 30_000);
+    save(LS.fails, []);
+    return true;
+  }
+  return false;
+}
+
+function clearFailures() {
+  localStorage.removeItem(LS.fails);
+  localStorage.removeItem(LS.lockout);
+}
+
+// ---------- Toast stack ----------
+
+function toast(msg, type = 'info', ms = 4000) {
+  const stack = $('toast-stack');
+  if (!stack) return;
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  el.addEventListener('click', () => dismiss());
+  // swipe-to-dismiss
+  let startX = null;
+  el.addEventListener('touchstart', e => { startX = e.touches[0].clientX; });
+  el.addEventListener('touchmove',  e => {
+    if (startX === null) return;
+    const dx = e.touches[0].clientX - startX;
+    el.style.transform = `translateX(${dx}px)`;
+    el.style.opacity = String(Math.max(0, 1 - Math.abs(dx) / 200));
+  });
+  el.addEventListener('touchend', e => {
+    if (startX === null) return;
+    const dx = (e.changedTouches[0].clientX) - startX;
+    if (Math.abs(dx) > 80) dismiss();
+    else { el.style.transform = ''; el.style.opacity = ''; }
+    startX = null;
+  });
+  stack.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('in'));
+  const t = setTimeout(dismiss, ms);
+  function dismiss() {
+    clearTimeout(t);
+    el.classList.remove('in');
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 250);
+  }
+}
+const toastOk  = m => toast(m, 'success', 2500);
+const toastErr = m => toast(m, 'error',  5000);
+
+// ---------- Progress bar ----------
+
+function startSync() {
+  state.syncCount++;
+  $('progress-bar')?.classList.add('active');
+  setDot('syncing');
+}
+function endSync() {
+  state.syncCount = Math.max(0, state.syncCount - 1);
+  if (state.syncCount === 0) {
+    $('progress-bar')?.classList.remove('active');
+    refreshDot();
+  }
 }
 
 // ---------- Status dot ----------
@@ -109,11 +216,7 @@ function refreshDot() { setDot(state.online ? 'online' : 'offline'); }
 // ---------- GitHub REST ----------
 
 class GhError extends Error {
-  constructor(status, body) {
-    super(`GitHub ${status}: ${String(body).slice(0,200)}`);
-    this.status = status;
-    this.body = body;
-  }
+  constructor(status, body) { super(`GitHub ${status}: ${String(body).slice(0,200)}`); this.status = status; this.body = body; }
 }
 
 async function gh(path, opts = {}) {
@@ -139,50 +242,50 @@ async function gh(path, opts = {}) {
   return res.json();
 }
 
-function isNetworkError(e) {
-  return !(e instanceof GhError) && (e instanceof TypeError || e.name === 'TypeError');
-}
+const isNetworkError = e => !(e instanceof GhError) && (e instanceof TypeError || e?.name === 'TypeError');
+
+// ---------- Unified file I/O ----------
+//
+// Every read goes through fetchFile(); every write goes through sync().
+// A per-path mutex serializes writes so rapid clicks cannot race → no 409.
+// putFile always re-fetches fresh SHA right before PUT and retries on 409.
 
 async function fetchFile(name) {
   const path = FILES[name];
-  const url = `/repos/${FIXED_REPO}/contents/${encodeURIComponent(path)}?ref=${FIXED_BRANCH}`;
-  const data = await gh(url);
-  const content = b64decode(data.content.replace(/\n/g, ''));
-  state.shas[path] = data.sha;
-  saveLS(LS_KEYS.shas, state.shas);
-  return content;
+  const data = await gh(`/repos/${FIXED_REPO}/contents/${encodeURIComponent(path)}?ref=${FIXED_BRANCH}`);
+  return { content: b64dec(data.content.replace(/\n/g, '')), sha: data.sha };
 }
 
 async function fetchSha(path) {
   try {
-    const data = await gh(`/repos/${FIXED_REPO}/contents/${encodeURIComponent(path)}?ref=${FIXED_BRANCH}`);
-    return data.sha;
+    const d = await gh(`/repos/${FIXED_REPO}/contents/${encodeURIComponent(path)}?ref=${FIXED_BRANCH}`);
+    return d.sha;
   } catch (e) {
     if (e.status === 404) return null;
     throw e;
   }
 }
 
-async function putFile(name, content, message, retries = 3) {
+async function putFile(name, content, message, retries = 4) {
   const path = FILES[name];
   let lastErr;
   for (let i = 0; i < retries; i++) {
     const sha = await fetchSha(path);
-    const body = { message, content: b64encode(content), branch: FIXED_BRANCH };
+    const body = { message, content: b64enc(content), branch: FIXED_BRANCH };
     if (sha) body.sha = sha;
     try {
-      const data = await gh(`/repos/${FIXED_REPO}/contents/${encodeURIComponent(path)}`, {
+      dlog(`PUT ${path} attempt ${i+1}/${retries} sha=${sha?.slice(0,7) || 'null'}`);
+      return await gh(`/repos/${FIXED_REPO}/contents/${encodeURIComponent(path)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      state.shas[path] = data.content.sha;
-      saveLS(LS_KEYS.shas, state.shas);
-      return data;
     } catch (e) {
       lastErr = e;
-      if (e.status === 409 && i < retries - 1) {
-        await new Promise(r => setTimeout(r, 150 * (i+1)));
+      if ((e.status === 409 || e.status === 422) && i < retries - 1) {
+        const wait = 120 * (i + 1);
+        dlog(`PUT ${path} ${e.status} → retry after ${wait}ms`);
+        await new Promise(r => setTimeout(r, wait));
         continue;
       }
       throw e;
@@ -191,256 +294,152 @@ async function putFile(name, content, message, retries = 3) {
   throw lastErr;
 }
 
-// ---------- Queue (ONLY network errors) ----------
+const mutex = Object.create(null);
+function runExclusive(key, fn) {
+  const prev = mutex[key] || Promise.resolve();
+  const task = prev.catch(() => {}).then(fn);
+  mutex[key] = task;
+  return task;
+}
 
+// queue only on network error
 function enqueue(op) {
   state.queue.push(op);
-  saveLS(LS_KEYS.queue, state.queue);
+  save(LS.queue, state.queue);
 }
 
 async function flushQueue() {
   if (!state.online || !state.token || state.queue.length === 0) return;
-  setDot('syncing');
-  const remaining = [];
+  startSync();
+  const keep = [];
   for (const op of state.queue) {
-    try {
-      await putFile(op.file, op.content, op.message);
-    } catch (e) {
-      if (isNetworkError(e)) remaining.push(op);
-      // API error → drop (stale), don't keep retrying forever
+    try { await runExclusive(op.file, () => putFile(op.file, op.content, op.message)); }
+    catch (e) {
+      if (isNetworkError(e)) keep.push(op);
+      else derr('flushQueue drop (API err):', e.message);
     }
   }
-  state.queue = remaining;
-  saveLS(LS_KEYS.queue, state.queue);
-  refreshDot();
+  state.queue = keep;
+  save(LS.queue, state.queue);
+  endSync();
 }
-
-// ---------- Sync wrapper ----------
 
 async function sync(name, content, message) {
+  if (!state.online) {
+    enqueue({ file: name, content, message });
+    toast('Offline — spremljeno u queue', 'info');
+    return { queued: true };
+  }
+  startSync();
   try {
-    if (!state.online) {
-      enqueue({ file: name, content, message });
-      return { queued: true };
-    }
-    setDot('syncing');
-    await putFile(name, content, message);
-    refreshDot();
+    await runExclusive(name, () => putFile(name, content, message));
     return { ok: true };
   } catch (e) {
-    refreshDot();
     if (isNetworkError(e)) {
       enqueue({ file: name, content, message });
-      return { queued: true, error: 'offline' };
+      toast('Offline — spremljeno u queue', 'info');
+      return { queued: true };
     }
     if (e.code === 'NO_TOKEN' || e.status === 401) {
-      openSettings('Unesi/obnovi token — prethodni nije valjan.');
+      toastErr('Token nedostaje ili je istekao. Otvori Postavke → GitHub token.');
+      openDialog('settings-dialog', 'Unesi/obnovi token.');
+    } else {
+      toastErr('Sync fail: ' + (e.message || e));
     }
     throw e;
+  } finally {
+    endSync();
   }
 }
 
-// ---------- Plan ----------
+// ---------- Plan + Danas checklist ----------
 
-async function renderPlan() {
-  const el = $('plan-content');
-  el.textContent = 'Učitavanje…';
+async function loadPlan() {
   try {
-    const md = await fetchFile('plan');
-    state.cache.plan = md;
-    el.innerHTML = marked.parse(md);
-    bindPlanCheckboxes();
-    const hdr = md.match(/^# (.+)$/m);
-    if (hdr) $('plan-title').textContent = hdr[1];
-    $('plan-updated').textContent = 'ažurirano: ' + new Date().toLocaleTimeString('hr-HR',{hour:'2-digit',minute:'2-digit'});
+    startSync();
+    const { content } = await fetchFile('plan');
+    state.cache.plan = content;
+    renderHero(content);
+    renderRaspored();
+    renderDanas(content);
   } catch (e) {
-    el.innerHTML = `<p class="muted">Greška: ${esc(e.message)}</p>`;
-    if (e.status === 401) openSettings('Token nije valjan.');
+    if (e.status === 404) {
+      state.cache.plan = '';
+      renderHero('');
+      renderRaspored();
+      renderDanas('');
+      toast('PLAN.md ne postoji (generirat će ga dnevna rutina).', 'info');
+    } else {
+      toastErr('Plan: ' + e.message);
+      if (e.status === 401 || e.code === 'NO_TOKEN') openDialog('settings-dialog', 'Unesi token.');
+    }
+  } finally {
+    endSync();
   }
 }
 
-function bindPlanCheckboxes() {
-  $('plan-content').querySelectorAll('input[type=checkbox]').forEach((cb, idx) => {
-    cb.disabled = false;
-    cb.addEventListener('change', () => toggleChecklist(idx, cb.checked));
-  });
-}
-
-async function toggleChecklist(idx, checked) {
-  let md;
-  try { md = await fetchFile('plan'); }
-  catch (e) { alert('Ne mogu pročitati plan: ' + e.message); return; }
-  let n = -1;
-  const updated = md.replace(/- \[( |x|X)\]/g, (m) => {
-    n++;
-    return n === idx ? (checked ? '- [x]' : '- [ ]') : m;
-  });
-  state.cache.plan = updated;
-  try {
-    await sync('plan', updated, `plan: toggle #${idx}`);
-    $('plan-content').innerHTML = marked.parse(updated);
-    bindPlanCheckboxes();
-  } catch (e) {
-    alert('Sync fail: ' + e.message);
-    renderPlan();
+function renderHero(md) {
+  const h1 = md.match(/^#\s+(.+)$/m);
+  const smjena = md.match(/Smjena:\s*([^\n(]+)\s*\(([^)]+)\)/i);
+  $('hero-title').textContent = h1 ? h1[1] : 'Plan';
+  if (smjena) {
+    $('hero-meta').textContent = `Smjena: ${smjena[1].trim()} (${smjena[2].trim()})`;
+  } else {
+    const d = new Date();
+    $('hero-meta').textContent = d.toLocaleDateString('hr-HR', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
   }
 }
 
-// ---------- Zadaci ----------
-
-function parseZadaci(md) {
-  const lines = md.split('\n');
-  const rx = /^-\s+\[\s?\]\s+(@\w+)\s+(.*)$/;
-  return lines.reduce((acc, line, i) => {
-    const m = line.match(rx);
-    if (m) acc.push({ line: i, tag: m[1], text: m[2] });
-    return acc;
-  }, []);
-}
-
-function renderZadaciList(tasks, optimisticIdx) {
-  const list = $('zadaci-list');
-  list.innerHTML = '';
-  if (!tasks.length) {
-    list.innerHTML = '<li class="muted">Nema zadataka.</li>';
+function renderDanas(md) {
+  const el = $('danas-checklist');
+  const sect = md.match(/##\s*Checklist\s*\n([\s\S]*?)(?=\n##\s|$)/i);
+  if (!sect) {
+    el.innerHTML = '<p class="muted empty">Nema danas-checkliste u planu.</p>';
     return;
   }
-  const rank = { '@hitno':0, '@danas':1, '@sutra':2, '@tjedan':3 };
-  const sorted = [...tasks].sort((a,b) => (rank[a.tag] ?? 9) - (rank[b.tag] ?? 9));
-  for (const t of sorted) {
-    const li = document.createElement('li');
-    li.className = 'task' + (t._optimistic ? ' optimistic' : '');
-    const tagKey = t.tag.replace('@','');
-    const safeTagKey = ['hitno','danas','sutra','tjedan'].includes(tagKey) ? tagKey : 'tjedan';
-    li.innerHTML = `
-      <span class="chip ${safeTagKey}">${esc(t.tag)}</span>
-      <span class="text"></span>
-      <button class="del" title="Obriši" aria-label="Obriši zadatak">✕</button>
-    `;
-    li.querySelector('.text').textContent = t.text;
-    li.querySelector('.del').addEventListener('click', () => deleteTask(t));
-    list.appendChild(li);
+  const lines = sect[1].split('\n').filter(l => /^-\s+\[/.test(l));
+  if (!lines.length) {
+    el.innerHTML = '<p class="muted empty">Nema stavki.</p>';
+    return;
   }
+  const html = marked.parse(lines.join('\n'));
+  el.innerHTML = html;
+  bindDanasCheckboxes();
 }
 
-async function renderZadaci() {
-  const list = $('zadaci-list');
-  list.innerHTML = '<li class="muted">Učitavanje…</li>';
-  try {
-    const md = await fetchFile('zadaci');
-    state.cache.zadaci = md;
-    renderZadaciList(parseZadaci(md));
-  } catch (e) {
-    list.innerHTML = `<li class="muted">Greška: ${esc(e.message)}</li>`;
-    if (e.status === 401) openSettings('Token nije valjan.');
-  }
-}
-
-async function addTask(text, tag) {
-  // optimistic
-  const current = parseZadaci(state.cache.zadaci || '');
-  current.push({ line: -1, tag, text, _optimistic: true });
-  renderZadaciList(current);
-
-  let md;
-  try { md = await fetchFile('zadaci'); }
-  catch (e) { alert('Ne mogu pročitati zadatke: ' + e.message); return renderZadaci(); }
-
-  let updated;
-  const marker = /(## Aktivni zadaci\s*\n(?:<!--[^>]*-->\s*\n)?)/;
-  if (marker.test(md)) {
-    updated = md.replace(marker, (m) => `${m}- [ ] ${tag} ${text}\n`);
-  } else {
-    updated = md.trimEnd() + `\n- [ ] ${tag} ${text}\n`;
-  }
-  state.cache.zadaci = updated;
-
-  try {
-    const r = await sync('zadaci', updated, `zadaci: add ${tag} ${text.slice(0,40)}`);
-    renderZadaciList(parseZadaci(updated));
-    if (r && r.queued) showToast('Offline — spremljeno u queue');
-  } catch (e) {
-    alert('Dodavanje nije uspjelo: ' + e.message);
-    renderZadaci();
-  }
-}
-
-async function deleteTask(t) {
-  let md;
-  try { md = await fetchFile('zadaci'); }
-  catch (e) { alert('Ne mogu pročitati zadatke: ' + e.message); return; }
-  const lines = md.split('\n');
-  const rx = new RegExp(`^-\\s+\\[\\s?\\]\\s+${t.tag.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\s+${t.text.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}$`);
-  let removed = false;
-  const out = lines.filter(l => {
-    if (!removed && rx.test(l)) { removed = true; return false; }
-    return true;
+function bindDanasCheckboxes() {
+  $('danas-checklist').querySelectorAll('input[type=checkbox]').forEach((cb, idx) => {
+    cb.disabled = false;
+    cb.addEventListener('change', () => toggleDanas(idx, cb.checked));
   });
-  if (!removed) { renderZadaci(); return; }
-  const updated = out.join('\n');
-  state.cache.zadaci = updated;
-
-  // optimistic re-render
-  renderZadaciList(parseZadaci(updated));
-
-  try {
-    await sync('zadaci', updated, `zadaci: del ${t.tag} ${t.text.slice(0,30)}`);
-  } catch (e) {
-    alert('Brisanje nije uspjelo: ' + e.message);
-    renderZadaci();
-  }
 }
 
-// ---------- Preferences ----------
+async function toggleDanas(sectionIdx, checked) {
+  let md;
+  try { md = (await fetchFile('plan')).content; }
+  catch (e) { toastErr('Ne mogu pročitati plan: ' + e.message); return; }
 
-async function renderPreferences() {
-  const ta = $('preferences-editor');
-  ta.value = 'Učitavanje…';
-  try {
-    const md = await fetchFile('preferences');
-    state.cache.preferences = md;
-    ta.value = md;
-    $('preferences-status').textContent = '';
-  } catch (e) {
-    ta.value = '';
-    $('preferences-status').textContent = 'Greška: ' + e.message;
-    if (e.status === 401) openSettings('Token nije valjan.');
-  }
-}
+  // only rewrite boxes inside ## Checklist section
+  const re = /(##\s*Checklist\s*\n)([\s\S]*?)(?=\n##\s|$)/i;
+  const m = md.match(re);
+  if (!m) { toastErr('Checklist sekcija nije pronađena.'); return; }
+  let n = -1;
+  const rewritten = m[2].replace(/- \[( |x|X)\]/g, s => {
+    n++;
+    return n === sectionIdx ? (checked ? '- [x]' : '- [ ]') : s;
+  });
+  const updated = md.replace(re, m[1] + rewritten);
+  state.cache.plan = updated;
+  renderDanas(updated);
 
-async function savePreferences() {
-  const md = $('preferences-editor').value;
-  state.cache.preferences = md;
-  $('preferences-status').textContent = 'spremam…';
-  try {
-    const r = await sync('preferences', md, 'preferences: update');
-    $('preferences-status').textContent = r && r.queued ? 'offline — u queue' : 'spremljeno';
-  } catch (e) {
-    $('preferences-status').textContent = 'greška: ' + e.message;
-  }
-  setTimeout(() => $('preferences-status').textContent = '', 2500);
-}
-
-// ---------- Context ----------
-
-async function renderContext() {
-  const el = $('context-content');
-  el.textContent = 'Učitavanje…';
-  try {
-    const md = await fetchFile('context');
-    state.cache.context = md;
-    el.innerHTML = marked.parse(md);
-    $('context-size').textContent = `${new Blob([md]).size} B / 2048 B`;
-  } catch (e) {
-    el.innerHTML = `<p class="muted">Greška: ${esc(e.message)}</p>`;
-    if (e.status === 401) openSettings('Token nije valjan.');
-  }
+  try { await sync('plan', updated, `plan: toggle #${sectionIdx}`); toastOk('Spremljeno'); }
+  catch (e) { await loadPlan(); }
 }
 
 // ---------- Raspored (timeline) ----------
 
-function toMin(t) { const [h,m] = t.split(':').map(Number); return h*60 + m; }
-function fromMin(m) { return `${String(Math.floor(m/60)%24).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`; }
+const toMin   = t => { const [h,m] = t.split(':').map(Number); return h*60 + m; };
+const fromMin = m => `${String(Math.floor(m/60)%24).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
 
 function categorize(label) {
   const l = label.toLowerCase();
@@ -456,33 +455,22 @@ function parseRasporedTable(md) {
   const sect = md.match(/##\s*Raspored\s*\n([\s\S]*?)(?=\n##\s|$)/i);
   if (!sect) return [];
   const rows = [...sect[1].matchAll(/\|\s*(\d{1,2}:\d{2})\s*\|\s*([^\n|]+?)\s*\|/g)];
-  const events = rows
-    .map(r => ({ time: r[1], label: r[2].trim() }))
-    .filter(e => /^\d{1,2}:\d{2}$/.test(e.time));
-  return events.map((e, i) => {
+  const items = rows.map(r => ({ time: r[1], label: r[2].trim() })).filter(e => /^\d{1,2}:\d{2}$/.test(e.time));
+  return items.map((e, i) => {
     const startM = toMin(e.time);
-    let endM;
-    if (events[i+1]) endM = toMin(events[i+1].time);
-    else endM = startM + 60;
+    let endM = items[i+1] ? toMin(items[i+1].time) : startM + 60;
     if (endM <= startM) endM = startM + 30;
-    return {
-      time: e.time,
-      end: fromMin(endM),
-      label: e.label,
-      startM,
-      endM,
-      cat: categorize(e.label),
-    };
+    return { time: e.time, end: fromMin(endM), label: e.label, startM, endM, cat: categorize(e.label) };
   });
 }
 
 function renderRaspored() {
   const root = $('timeline');
+  if (!root) return;
   root.innerHTML = '';
   const inner = document.createElement('div');
   inner.className = 'timeline-inner';
 
-  // hour grid
   for (let h = TIMELINE_START_H; h <= TIMELINE_END_H; h++) {
     const row = document.createElement('div');
     row.className = 'timeline-hour';
@@ -494,10 +482,12 @@ function renderRaspored() {
   const md = state.cache.plan || '';
   const events = parseRasporedTable(md);
 
-  let title = 'Danas';
-  const h1 = md.match(/^#\s+(.+)$/m);
-  if (h1) title = h1[1];
-  $('raspored-date').textContent = title;
+  if (!events.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty timeline-empty';
+    empty.textContent = md ? 'Nema stavki u sekciji ## Raspored.' : 'Plan još nije generiran.';
+    inner.appendChild(empty);
+  }
 
   for (const ev of events) {
     const top = (ev.startM - TIMELINE_START_H * 60) * PX_PER_MIN;
@@ -513,19 +503,17 @@ function renderRaspored() {
     inner.appendChild(block);
   }
 
-  // now line
-  const now = nowLineY();
-  if (now !== null) {
+  const nowY = nowLineY();
+  if (nowY !== null) {
     const line = document.createElement('div');
     line.className = 'timeline-now';
-    line.style.top = `${now}px`;
+    line.style.top = `${nowY}px`;
     inner.appendChild(line);
   }
 
   root.appendChild(inner);
 
-  // auto-scroll to now (or 08:00 if now outside)
-  let scrollTo = now ?? ((8 - TIMELINE_START_H) * 60);
+  let scrollTo = nowY ?? ((8 - TIMELINE_START_H) * 60);
   scrollTo = Math.max(0, scrollTo - root.clientHeight / 3);
   root.scrollTop = scrollTo;
 
@@ -545,11 +533,9 @@ function startNowTimer() {
     const line = document.querySelector('.timeline-now');
     const y = nowLineY();
     if (line && y !== null) line.style.top = `${y}px`;
-  }, 60000);
+  }, 60_000);
 }
-function stopNowTimer() {
-  if (state.nowTimer) { clearInterval(state.nowTimer); state.nowTimer = null; }
-}
+function stopNowTimer() { if (state.nowTimer) { clearInterval(state.nowTimer); state.nowTimer = null; } }
 
 function showPopover(ev) {
   const p = $('raspored-popover');
@@ -561,52 +547,188 @@ function showPopover(ev) {
   showPopover._t = setTimeout(() => { p.hidden = true; }, 3500);
 }
 
-// ---------- Tabs ----------
+// ---------- Zadaci ----------
 
-async function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
-  if (name === 'plan') await renderPlan();
-  if (name === 'raspored') {
-    if (!state.cache.plan) await renderPlan();
-    renderRaspored();
+function parseZadaci(md) {
+  const lines = md.split('\n');
+  const rx = /^-\s+\[\s?\]\s+(@\w+)\s+(.*)$/;
+  return lines.reduce((acc, line, i) => {
+    const m = line.match(rx);
+    if (m) acc.push({ line: i, tag: m[1], text: m[2] });
+    return acc;
+  }, []);
+}
+
+function renderZadaciList(tasks) {
+  const list = $('zadaci-list');
+  list.innerHTML = '';
+  if (!tasks.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'Još nema zadataka. Dodaj prvi.';
+    list.appendChild(li);
+    return;
   }
-  if (name === 'zadaci') await renderZadaci();
-  if (name === 'preferences') await renderPreferences();
-  if (name === 'context') await renderContext();
+  const rank = { '@hitno':0, '@danas':1, '@sutra':2, '@tjedan':3 };
+  const sorted = [...tasks].sort((a,b) => (rank[a.tag] ?? 9) - (rank[b.tag] ?? 9));
+  for (const t of sorted) {
+    const li = document.createElement('li');
+    li.className = 'task' + (t._optimistic ? ' optimistic' : '');
+    const tagKey = t.tag.replace('@','');
+    const safeTagKey = ['hitno','danas','sutra','tjedan'].includes(tagKey) ? tagKey : 'tjedan';
+    li.innerHTML = `
+      <span class="chip ${safeTagKey}"></span>
+      <span class="text"></span>
+      <button class="del" title="Obriši" aria-label="Obriši zadatak">✕</button>
+    `;
+    li.querySelector('.chip').textContent = t.tag;
+    li.querySelector('.text').textContent = t.text;
+    li.querySelector('.del').addEventListener('click', () => deleteTask(t, li));
+    list.appendChild(li);
+  }
 }
 
-// ---------- Polling ----------
-
-function startPolling() {
-  stopPolling();
-  state.pollTimer = setInterval(() => {
-    if (document.visibilityState !== 'visible') return;
-    const active = document.querySelector('.tab.active')?.dataset.tab;
-    if (active === 'plan') renderPlan();
-    if (active === 'zadaci') renderZadaci();
-    if (active === 'raspored') { renderPlan().then(() => renderRaspored()); }
-  }, 60000);
+async function loadZadaci() {
+  const list = $('zadaci-list');
+  list.innerHTML = '<li class="empty">Učitavanje…</li>';
+  try {
+    startSync();
+    const { content } = await fetchFile('zadaci');
+    state.cache.zadaci = content;
+    renderZadaciList(parseZadaci(content));
+  } catch (e) {
+    if (e.status === 404) {
+      state.cache.zadaci = '## Aktivni zadaci\n';
+      renderZadaciList([]);
+    } else {
+      list.innerHTML = `<li class="empty">Greška: ${esc(e.message)}</li>`;
+      toastErr('Zadaci: ' + e.message);
+      if (e.status === 401 || e.code === 'NO_TOKEN') openDialog('settings-dialog', 'Unesi token.');
+    }
+  } finally { endSync(); }
 }
-function stopPolling() {
-  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+
+async function addTask(text, tag) {
+  dlog('addTask', tag, text);
+  // optimistic
+  const base = parseZadaci(state.cache.zadaci || '');
+  base.push({ line: -1, tag, text, _optimistic: true });
+  renderZadaciList(base);
+
+  try {
+    // ensure we have the latest file right before mutating
+    let md;
+    try {
+      md = (await fetchFile('zadaci')).content;
+    } catch (e) {
+      if (e.status === 404) md = '## Aktivni zadaci\n';
+      else throw e;
+    }
+    let updated;
+    const marker = /(## Aktivni zadaci\s*\n(?:<!--[^>]*-->\s*\n)?)/;
+    if (marker.test(md)) updated = md.replace(marker, m => `${m}- [ ] ${tag} ${text}\n`);
+    else                 updated = md.trimEnd() + `\n## Aktivni zadaci\n- [ ] ${tag} ${text}\n`;
+
+    state.cache.zadaci = updated;
+    await sync('zadaci', updated, `zadaci: add ${tag} ${text.slice(0,40)}`);
+    renderZadaciList(parseZadaci(updated));
+    toastOk('Dodano');
+  } catch (e) {
+    derr('addTask fail', e);
+    toastErr('Dodavanje nije uspjelo: ' + (e.message || e));
+    await loadZadaci();
+  }
 }
 
-// ---------- Settings ----------
-
-function openSettings(msg) {
-  $('token-input').value = state.token;
-  $('pw-old').value = '';
-  $('pw-new').value = '';
-  $('pw-confirm').value = '';
-  $('pw-status').textContent = '';
-  $('token-status').textContent = msg || '';
-  $('app-version').textContent = APP_VERSION;
-  $('settings-dialog').showModal();
+async function deleteTask(t, liEl) {
+  dlog('deleteTask', t.tag, t.text);
+  if (liEl) liEl.classList.add('removing');
+  try {
+    let md;
+    try { md = (await fetchFile('zadaci')).content; }
+    catch (e) { if (e.status === 404) md = ''; else throw e; }
+    const re = new RegExp(
+      `^-\\s+\\[\\s?\\]\\s+${t.tag.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\s+${t.text.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\s*$`
+    );
+    const lines = md.split('\n');
+    let removed = false;
+    const out = lines.filter(l => {
+      if (!removed && re.test(l)) { removed = true; return false; }
+      return true;
+    });
+    if (!removed) { toast('Zadatak nije pronađen (možda već obrisan).', 'info'); return loadZadaci(); }
+    const updated = out.join('\n');
+    state.cache.zadaci = updated;
+    await sync('zadaci', updated, `zadaci: del ${t.tag} ${t.text.slice(0,30)}`);
+    renderZadaciList(parseZadaci(updated));
+    toastOk('Obrisano');
+  } catch (e) {
+    derr('deleteTask fail', e);
+    toastErr('Brisanje nije uspjelo: ' + (e.message || e));
+    await loadZadaci();
+  }
 }
+
+// ---------- Preferences & Context (modals) ----------
+
+async function openPreferences() {
+  openDialog('preferences-dialog');
+  const ta = $('preferences-editor');
+  ta.value = 'Učitavanje…';
+  try {
+    const { content } = await fetchFile('preferences');
+    state.cache.preferences = content;
+    ta.value = content;
+  } catch (e) {
+    ta.value = '';
+    toastErr('Preferencije: ' + e.message);
+    if (e.status === 401 || e.code === 'NO_TOKEN') openDialog('settings-dialog', 'Unesi token.');
+  }
+}
+
+async function savePreferences() {
+  const md = $('preferences-editor').value;
+  state.cache.preferences = md;
+  try {
+    await sync('preferences', md, 'preferences: update');
+    toastOk('Preferencije spremljene');
+    $('preferences-dialog').close();
+  } catch (e) { /* sync already toasted */ }
+}
+
+async function openContext() {
+  openDialog('context-dialog');
+  const el = $('context-content');
+  el.textContent = 'Učitavanje…';
+  try {
+    const { content } = await fetchFile('context');
+    state.cache.context = content;
+    el.innerHTML = marked.parse(content);
+    $('context-size').textContent = `${new Blob([content]).size} B / 2048 B`;
+  } catch (e) {
+    el.innerHTML = `<p class="muted">Greška: ${esc(e.message)}</p>`;
+    if (e.status === 401 || e.code === 'NO_TOKEN') openDialog('settings-dialog', 'Unesi token.');
+  }
+}
+
+// ---------- Dialogs ----------
+
+function openDialog(id, msg) {
+  const d = $(id);
+  if (!d) return;
+  if (id === 'settings-dialog') {
+    $('token-input').value = state.token;
+    $('pw-old').value = ''; $('pw-new').value = ''; $('pw-confirm').value = '';
+    $('pw-status').textContent = '';
+    $('token-status').textContent = msg || '';
+    $('app-version').textContent = APP_VERSION;
+  }
+  if (!d.open) d.showModal();
+}
+
+// ---------- Password change / reset ----------
 
 async function handlePwChange() {
-  dlog('handlePwChange clicked');
   const oldPw = $('pw-old').value;
   const newPw = $('pw-new').value;
   const conf  = $('pw-confirm').value;
@@ -614,12 +736,9 @@ async function handlePwChange() {
   s.style.color = '';
   if (!newPw) { s.style.color = 'var(--danger)'; s.textContent = 'nova šifra prazna'; return; }
   if (newPw !== conf) { s.style.color = 'var(--danger)'; s.textContent = 'potvrda ne odgovara'; return; }
-  const oldOk = await verifyPassword(oldPw);
-  if (!oldOk) { s.style.color = 'var(--danger)'; s.textContent = 'stara šifra pogrešna'; return; }
+  if (!await verifyPassword(oldPw)) { s.style.color = 'var(--danger)'; s.textContent = 'stara šifra pogrešna'; return; }
   await setPassword(newPw);
-  const verifyAfter = await verifyPassword(newPw);
-  dlog('post-setPassword verify(newPw):', verifyAfter);
-  if (!verifyAfter) { s.style.color = 'var(--danger)'; s.textContent = 'pohrana nije uspjela'; return; }
+  if (!await verifyPassword(newPw)) { s.style.color = 'var(--danger)'; s.textContent = 'pohrana nije uspjela'; return; }
   s.style.color = 'var(--success)';
   s.textContent = 'šifra promijenjena';
   $('pw-old').value = ''; $('pw-new').value = ''; $('pw-confirm').value = '';
@@ -628,71 +747,55 @@ async function handlePwChange() {
 
 async function handlePwReset() {
   if (!confirm('Resetirati šifru na default "1"? Ostali podaci ostaju.')) return;
-  await setDefaultPwHash();
-  showToast('Šifra resetirana na "1". Reload…');
-  setTimeout(() => location.reload(), 600);
+  await resetToDefault();
+  toastOk('Šifra resetirana na "1". Reload…');
+  setTimeout(() => location.reload(), 500);
 }
+
+// ---------- Token + maintenance ----------
 
 function handleTokenSave() {
   const t = $('token-input').value.trim();
   state.token = t;
-  saveLS(LS_KEYS.token, t);
-  state.shas = {};
-  saveLS(LS_KEYS.shas, state.shas);
+  save(LS.token, t);
   $('token-status').textContent = 'spremljeno';
   setTimeout(() => $('token-status').textContent = '', 2000);
-  const active = document.querySelector('.tab.active')?.dataset.tab || 'plan';
-  switchTab(active);
+  toastOk('Token spremljen');
+  loadPlan(); loadZadaci();
 }
 
 function handleClearCache() {
-  const keep = localStorage.getItem(LS_KEYS.token);
-  const pw   = localStorage.getItem(LS_KEYS.pwhash);
+  const tok = localStorage.getItem(LS.token);
+  const pw  = localStorage.getItem(LS.pwhash);
+  const salt = localStorage.getItem(LS.salt);
   localStorage.clear();
   sessionStorage.clear();
-  if (keep) saveLS(LS_KEYS.token, keep);
-  if (pw)   saveLS(LS_KEYS.pwhash, pw);
-  state.queue = []; state.shas = {}; state.cache = {};
-  saveLS(LS_KEYS.queue, state.queue);
-  saveLS(LS_KEYS.shas, state.shas);
-  showToast('Cache obrisan');
+  if (tok) save(LS.token, tok);
+  if (pw)  save(LS.pwhash, pw);
+  if (salt) save(LS.salt, salt);
+  state.queue = []; state.cache = {};
+  toastOk('Cache obrisan');
 }
 
 function handleClearAll() {
-  if (!confirm('Obrisati token, šifru i cache? (šifra se resetira na "1")')) return;
+  if (!confirm('Obrisati token, šifru, salt i cache? (šifra se resetira na "1")')) return;
   localStorage.clear();
   sessionStorage.clear();
-  state.token = ''; state.queue = []; state.shas = {}; state.cache = {};
+  state.token = ''; state.queue = []; state.cache = {};
   location.reload();
 }
 
-// ---------- Toast ----------
-
-function showToast(msg) {
-  let t = document.getElementById('mr-toast');
-  if (!t) {
-    t = document.createElement('div');
-    t.id = 'mr-toast';
-    t.style.cssText = 'position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--elevated);border:1px solid var(--border);padding:10px 14px;border-radius:10px;font-size:13px;z-index:30;box-shadow:var(--shadow)';
-    document.body.appendChild(t);
-  }
-  t.textContent = msg;
-  t.style.opacity = '1';
-  clearTimeout(showToast._t);
-  showToast._t = setTimeout(() => { t.style.opacity = '0'; }, 2500);
-}
-
-// ---------- Lock screen ----------
+// ---------- Lock screen + rate limit ----------
 
 async function unlockApp() {
-  dlog('unlockApp() → show app');
   $('lock-screen').hidden = true;
   $('app').hidden = false;
   refreshDot();
+  clearFailures();
   if (!state.token) {
-    openSettings('Unesi GitHub token (prvi put).');
+    openDialog('settings-dialog', 'Unesi GitHub token (prvi put).');
   } else {
-    renderPlan();
+    await Promise.all([loadPlan(), loadZadaci()]);
     flushQueue();
   }
   startPolling();
@@ -700,62 +803,83 @@ async function unlockApp() {
 
 async function handleLockSubmit(e) {
   e.preventDefault();
+  const lock = getLockoutSeconds();
+  if (lock > 0) {
+    toastErr(`Lockout — pokušaj za ${lock}s`);
+    return;
+  }
   const pw = $('lock-input').value;
   const errEl = $('lock-error');
   errEl.hidden = true;
-  dlog('handleLockSubmit pw len:', pw.length);
   try {
     const ok = await verifyPassword(pw);
-    if (ok) {
-      await unlockApp();
+    if (ok) { await unlockApp(); return; }
+    const locked = recordFailure();
+    $('lock-input').value = '';
+    $('lock-input').focus();
+    if (locked) {
+      errEl.textContent = 'Previše pokušaja, pokušaj za 30s.';
+      errEl.hidden = false;
+      toastErr('Previše pokušaja, pokušaj za 30s');
     } else {
       errEl.textContent = 'Pogrešna šifra';
       errEl.hidden = false;
-      $('lock-input').value = '';
-      $('lock-input').focus();
     }
   } catch (err) {
-    console.error('[auth] unlock error', err);
+    derr('unlock error', err);
     errEl.textContent = 'Greška: ' + (err.message || err);
     errEl.hidden = false;
   }
 }
 
 async function initAuth() {
-  dlog('initAuth start');
-  await ensureDefaultPwHash();
+  await ensureSaltAndDefault();
   $('lock-screen').hidden = false;
   $('app').hidden = true;
   setTimeout(() => $('lock-input').focus(), 0);
 }
 
-// ---------- Service worker ----------
+// ---------- Polling ----------
+
+function startPolling() {
+  stopPolling();
+  state.pollTimer = setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    loadPlan(); loadZadaci();
+  }, 60_000);
+}
+function stopPolling() { if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; } }
+
+// ---------- SW ----------
 
 function registerSW() {
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
 // ---------- Init ----------
 
 function bindEvents() {
   $('lock-form').addEventListener('submit', handleLockSubmit);
-  document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
-  $('settings-btn').addEventListener('click', () => openSettings());
-  $('refresh-btn').addEventListener('click', () => {
-    const active = document.querySelector('.tab.active')?.dataset.tab || 'plan';
-    switchTab(active);
-  });
+
+  $('settings-btn').addEventListener('click', () => openDialog('settings-dialog'));
+  $('refresh-btn').addEventListener('click', () => { loadPlan(); loadZadaci(); });
+
+  $('footer-preferences').addEventListener('click', openPreferences);
+  $('footer-context').addEventListener('click', openContext);
+  $('footer-settings').addEventListener('click', () => openDialog('settings-dialog'));
+
   $('preferences-save').addEventListener('click', savePreferences);
+
   $('zadaci-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const text = $('zadaci-input').value.trim();
-    if (!text) return;
-    const tag = $('zadaci-tag').value;
-    $('zadaci-input').value = '';
+    const input = $('zadaci-input');
+    const text = input.value.trim();
+    if (!text) { toast('Napiši nešto prije dodavanja.', 'info'); return; }
+    const tag = $('zadaci-tag').value || '@sutra';
+    input.value = '';
     await addTask(text, tag);
   });
+
   $('pw-save').addEventListener('click', handlePwChange);
   $('pw-reset').addEventListener('click', handlePwReset);
   $('token-save').addEventListener('click', handleTokenSave);
@@ -763,21 +887,17 @@ function bindEvents() {
   $('clear-all').addEventListener('click', handleClearAll);
 
   window.addEventListener('online',  () => { state.online = true;  refreshDot(); flushQueue(); });
-  window.addEventListener('offline', () => { state.online = false; refreshDot(); });
+  window.addEventListener('offline', () => { state.online = false; refreshDot(); toast('Offline', 'info'); });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') flushQueue();
   });
 }
 
 function boot() {
-  try { bindEvents(); }
-  catch (e) { console.error('[boot] bindEvents failed', e); }
-  initAuth().catch(e => console.error('[boot] initAuth failed', e));
+  try { bindEvents(); } catch (e) { derr('bindEvents failed', e); }
+  initAuth().catch(e => derr('initAuth failed', e));
   registerSW();
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', boot);
-} else {
-  boot();
-}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+else boot();

@@ -10,7 +10,7 @@
 </head>
 <body>
 
-<!-- Password lock overlay -->
+<!-- Password lock -->
 <div id="lock-screen" class="lock-screen" hidden>
   <form id="lock-form" class="lock-box">
     <h2>Moj raspored</h2>
@@ -22,81 +22,92 @@
 
 <div id="app" hidden>
 
-<header class="topbar">
-  <h1>Moj raspored</h1>
-  <div class="topbar-actions">
-    <span id="status-dot" class="dot" title="offline/online"></span>
-    <button id="refresh-btn" aria-label="Osvježi">↻</button>
-    <button id="settings-btn" aria-label="Postavke">⚙</button>
-  </div>
-</header>
+  <div id="progress-bar"></div>
 
-<nav class="tabs">
-  <button class="tab active" data-tab="plan">Plan</button>
-  <button class="tab" data-tab="raspored">Raspored</button>
-  <button class="tab" data-tab="zadaci">Zadaci</button>
-  <button class="tab" data-tab="preferences">Preferencije</button>
-  <button class="tab" data-tab="context">Kontekst</button>
-</nav>
+  <header class="topbar">
+    <div class="brand">
+      <h1 id="hero-title">Moj raspored</h1>
+      <p class="muted small" id="hero-meta"></p>
+    </div>
+    <div class="topbar-actions">
+      <span id="status-dot" class="dot" title="offline/online"></span>
+      <button id="refresh-btn" aria-label="Osvježi">↻</button>
+      <button id="settings-btn" aria-label="Postavke">⚙</button>
+    </div>
+  </header>
 
-<main>
+  <main class="single-scroll">
 
-<section id="tab-plan" class="pane active">
-  <div class="pane-head">
-    <h2 id="plan-title">Plan</h2>
-    <span class="muted" id="plan-updated"></span>
-  </div>
-  <article id="plan-content" class="card markdown">Učitavanje…</article>
-</section>
+    <section class="block" id="section-raspored">
+      <div class="section-head"><h2>Raspored</h2></div>
+      <div class="timeline-wrap card">
+        <div id="timeline" class="timeline" role="list" aria-label="Dnevni raspored"></div>
+      </div>
+      <div id="raspored-popover" class="popover" hidden>
+        <h4 id="pop-title"></h4>
+        <p class="muted" id="pop-time"></p>
+        <p id="pop-cat"></p>
+      </div>
+    </section>
 
-<section id="tab-raspored" class="pane">
-  <div class="pane-head">
-    <h2>Raspored</h2>
-    <span class="muted" id="raspored-date"></span>
-  </div>
-  <div class="timeline-wrap card">
-    <div id="timeline" class="timeline" role="list" aria-label="Dnevni raspored"></div>
-  </div>
-  <div id="raspored-popover" class="popover" hidden>
-    <h4 id="pop-title"></h4>
-    <p class="muted" id="pop-time"></p>
-    <p id="pop-cat"></p>
-  </div>
-</section>
+    <section class="block" id="section-danas">
+      <div class="section-head"><h2>Danas</h2></div>
+      <article id="danas-checklist" class="card markdown"></article>
+    </section>
 
-<section id="tab-zadaci" class="pane">
-  <div class="pane-head"><h2>Zadaci</h2></div>
-  <form id="zadaci-form" class="zadaci-form card">
-    <input id="zadaci-input" placeholder="Novi zadatak…" autocomplete="off">
-    <select id="zadaci-tag">
-      <option value="@hitno">@hitno</option>
-      <option value="@danas">@danas</option>
-      <option value="@sutra" selected>@sutra</option>
-      <option value="@tjedan">@tjedan</option>
-    </select>
-    <button type="submit">Dodaj</button>
+    <section class="block" id="section-zadaci">
+      <div class="section-head"><h2>Zadaci</h2></div>
+      <form id="zadaci-form" class="zadaci-form card">
+        <input id="zadaci-input" placeholder="Novi zadatak…" autocomplete="off">
+        <select id="zadaci-tag">
+          <option value="@hitno">@hitno</option>
+          <option value="@danas">@danas</option>
+          <option value="@sutra" selected>@sutra</option>
+          <option value="@tjedan">@tjedan</option>
+        </select>
+        <button type="submit">Dodaj</button>
+      </form>
+      <ul id="zadaci-list" class="tasklist"></ul>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <button type="button" class="link-btn" id="footer-preferences">Preferencije</button>
+    <span class="sep">·</span>
+    <button type="button" class="link-btn" id="footer-context">Kontekst</button>
+    <span class="sep">·</span>
+    <button type="button" class="link-btn" id="footer-settings">Postavke</button>
+  </footer>
+
+</div>
+
+<div id="toast-stack" aria-live="polite"></div>
+
+<dialog id="preferences-dialog">
+  <form method="dialog">
+    <h3>Preferencije</h3>
+    <textarea id="preferences-editor" spellcheck="false"></textarea>
+    <span class="muted small" id="preferences-status"></span>
+    <div class="dialog-actions">
+      <button value="close">Zatvori</button>
+      <button type="button" id="preferences-save" class="primary">Spremi</button>
+    </div>
   </form>
-  <ul id="zadaci-list" class="tasklist"></ul>
-</section>
+</dialog>
 
-<section id="tab-preferences" class="pane">
-  <div class="pane-head"><h2>Preferencije</h2></div>
-  <textarea id="preferences-editor" class="card" spellcheck="false"></textarea>
-  <div class="pane-actions">
-    <button id="preferences-save">Spremi</button>
-    <span class="muted" id="preferences-status"></span>
-  </div>
-</section>
-
-<section id="tab-context" class="pane">
-  <div class="pane-head"><h2>Kontekst</h2><span class="muted" id="context-size"></span></div>
-  <article id="context-content" class="card markdown"></article>
-</section>
-
-</main>
+<dialog id="context-dialog">
+  <form method="dialog">
+    <h3>Kontekst <span class="muted small" id="context-size"></span></h3>
+    <article id="context-content" class="markdown"></article>
+    <div class="dialog-actions">
+      <button value="close">Zatvori</button>
+    </div>
+  </form>
+</dialog>
 
 <dialog id="settings-dialog">
-  <form id="settings-form" method="dialog">
+  <form method="dialog">
     <h3>Postavke</h3>
 
     <fieldset>
@@ -104,16 +115,16 @@
       <label>Stara šifra<input id="pw-old" type="password" autocomplete="current-password"></label>
       <label>Nova šifra<input id="pw-new" type="password" autocomplete="new-password"></label>
       <label>Potvrdi novu<input id="pw-confirm" type="password" autocomplete="new-password"></label>
-      <button type="button" id="pw-save">Promijeni šifru</button>
+      <button type="button" id="pw-save" class="primary">Promijeni šifru</button>
       <span class="muted small" id="pw-status"></span>
     </fieldset>
 
     <fieldset>
       <legend>GitHub token</legend>
       <label>Token<input id="token-input" type="password" autocomplete="off" placeholder="ghp_…"></label>
-      <button type="button" id="token-save">Ažuriraj token</button>
+      <button type="button" id="token-save" class="primary">Ažuriraj token</button>
       <span class="muted small" id="token-status"></span>
-      <p class="muted small">Fine-grained PAT, scope: Contents R/W za <code>matijawork/matijawork.github.io</code>.</p>
+      <p class="muted small">Fine-grained PAT, Contents R/W za <code>matijawork/matijawork.github.io</code>.</p>
     </fieldset>
 
     <fieldset>
@@ -132,6 +143,6 @@
 </dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
-<script src="app.js?v=2.1.0" defer></script>
+<script src="app.js?v=2.2.0" defer></script>
 </body>
 </html>

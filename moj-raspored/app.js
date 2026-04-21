@@ -117,7 +117,7 @@ function authHeaders(extra = {}) {
 async function ghGet(path) {
   if (!state.token) { const e = new Error('NO_TOKEN'); e.code = 'NO_TOKEN'; throw e; }
   const url = `https://api.github.com/repos/${FIXED_REPO}/contents/${path}?ref=${FIXED_BRANCH}`;
-  const res = await fetch(url, { headers: authHeaders() });
+  const res = await fetch(url, { headers: authHeaders(), cache: 'no-store' });
   if (res.status === 404) { const e = new GhError(404, 'not found'); throw e; }
   if (!res.ok) throw new GhError(res.status, await res.text().catch(() => ''));
   return res.json();
@@ -136,7 +136,7 @@ async function ghWrite(path, content, message) {
   let lastErr;
   for (let i = 0; i < 3; i++) {
     let sha;
-    const getRes = await fetch(`${url}?ref=${FIXED_BRANCH}`, { headers: authHeaders() });
+    const getRes = await fetch(`${url}?ref=${FIXED_BRANCH}`, { headers: authHeaders(), cache: 'no-store' });
     if (getRes.ok) sha = (await getRes.json()).sha;
     else if (getRes.status !== 404) {
       throw new GhError(getRes.status, await getRes.text().catch(() => ''));

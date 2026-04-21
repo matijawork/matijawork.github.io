@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0a0a0f">
+<meta name="theme-color" content="#000000">
 <title>Moj raspored</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=2.4.0">
 <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
@@ -14,15 +14,18 @@
 
   <div id="progress-bar"></div>
 
-  <header class="topbar">
-    <div class="brand">
-      <h1 id="hero-title">Moj raspored</h1>
-      <p class="muted small" id="hero-meta"></p>
+  <header id="hero" class="hero">
+    <div class="hero-left">
+      <p id="hero-date" class="hero-date"></p>
+      <h1 id="hero-title" class="hero-title">Moj raspored</h1>
+      <p id="hero-countdown" class="hero-countdown"></p>
     </div>
-    <div class="topbar-actions">
-      <span id="status-dot" class="dot" title="offline/online"></span>
-      <button id="refresh-btn" aria-label="Osvježi">↻</button>
-      <button id="settings-btn" aria-label="Postavke">⚙</button>
+    <div class="hero-right">
+      <span id="hero-smjena" class="badge" hidden></span>
+      <div class="hero-actions">
+        <span id="status-dot" class="dot" title="offline/online"></span>
+        <button id="refresh-btn" aria-label="Osvježi">↻</button>
+      </div>
     </div>
   </header>
 
@@ -32,11 +35,6 @@
       <div class="section-head"><h2>Raspored</h2></div>
       <div class="timeline-wrap card">
         <div id="timeline" class="timeline" role="list" aria-label="Dnevni raspored"></div>
-      </div>
-      <div id="raspored-popover" class="popover" hidden>
-        <h4 id="pop-title"></h4>
-        <p class="muted" id="pop-time"></p>
-        <p id="pop-cat"></p>
       </div>
     </section>
 
@@ -63,19 +61,25 @@
   </main>
 
   <footer class="footer">
-    <button type="button" class="link-btn" id="footer-preferences">Preferencije</button>
-    <span class="sep">·</span>
-    <button type="button" class="link-btn" id="footer-context">Kontekst</button>
-    <span class="sep">·</span>
-    <button type="button" class="link-btn" id="footer-settings">Postavke</button>
+    <div id="spy-indicator" class="spy-indicator"></div>
+    <button type="button" class="icon-btn" id="footer-settings" aria-label="Postavke">
+      <span class="ico">⚙</span><span class="lbl">Postavke</span>
+    </button>
+    <button type="button" class="icon-btn" id="footer-preferences" aria-label="Preferencije">
+      <span class="ico">📝</span><span class="lbl">Preferencije</span>
+    </button>
+    <button type="button" class="icon-btn" id="footer-context" aria-label="Kontekst">
+      <span class="ico">🧠</span><span class="lbl">Kontekst</span>
+    </button>
   </footer>
 
 </div>
 
 <div id="toast-stack" aria-live="polite"></div>
 
-<dialog id="preferences-dialog">
+<dialog id="preferences-dialog" class="sheet">
   <form method="dialog">
+    <div class="sheet-grip"></div>
     <h3>Preferencije</h3>
     <textarea id="preferences-editor" spellcheck="false"></textarea>
     <span class="muted small" id="preferences-status"></span>
@@ -86,8 +90,9 @@
   </form>
 </dialog>
 
-<dialog id="context-dialog">
+<dialog id="context-dialog" class="sheet">
   <form method="dialog">
+    <div class="sheet-grip"></div>
     <h3>Kontekst <span class="muted small" id="context-size"></span></h3>
     <article id="context-content" class="markdown"></article>
     <div class="dialog-actions">
@@ -96,8 +101,9 @@
   </form>
 </dialog>
 
-<dialog id="settings-dialog">
+<dialog id="settings-dialog" class="sheet">
   <form method="dialog">
+    <div class="sheet-grip"></div>
     <h3>Postavke</h3>
 
     <fieldset>
@@ -123,6 +129,6 @@
 </dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
-<script src="app.js?v=2.3.0" defer></script>
+<script src="app.js?v=2.4.0" defer></script>
 </body>
 </html>

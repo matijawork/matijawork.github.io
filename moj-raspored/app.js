@@ -1,25 +1,23 @@
-// Moj raspored — frontend v2.2.0
-// - SHA-256 + salt password (migrates from unsalted v2.1.0)
-// - Rate limit: 5 failed unlocks / 60s → 30s lockout
+// Moj raspored — frontend v2.3.0
+// - No password lock (removed)
 // - Per-path write mutex → zero races → no 409 under normal use
 // - Fresh SHA fetch + 409 retry for each PUT
 // - Unified sync() → single write path for every file
 // - Toast stack (error/success/info), top progress bar, empty states
 // - Single-scroll layout: Raspored → Danas → Zadaci; Preferences/Context/Settings as modals
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const DEBUG = true;
 const dlog = (...a) => { if (DEBUG) console.log('[mr]', ...a); };
 const derr = (...a) => console.error('[mr]', ...a);
 
 const LS = {
-  token:    'mr.token',
-  pwhash:   'mr.pwhash',
-  salt:     'mr.salt',
-  fails:    'mr.unlockFails',
-  lockout:  'mr.lockoutUntil',
-  queue:    'mr.queue',
+  token: 'mr.token',
+  queue: 'mr.queue',
 };
+
+// Legacy keys to purge on boot (v2.0 — v2.2 left these around):
+const LEGACY_KEYS = ['mr.pwhash', 'mr.salt', 'mr.unlockFails', 'mr.lockoutUntil', 'mr.shas'];
 
 const FIXED_REPO   = 'matijawork/matijawork.github.io';
 const FIXED_BRANCH = 'main';
@@ -53,100 +51,17 @@ const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&
 const b64enc = s => btoa(unescape(encodeURIComponent(s)));
 const b64dec = b => decodeURIComponent(escape(atob(b)));
 
-// ---------- Crypto / password with salt ----------
+// ---------- Legacy cleanup ----------
 
-async function sha256Hex(s) {
-  if (typeof s !== 'string') s = String(s ?? '');
-  const buf = new TextEncoder().encode(s);
-  const hash = await crypto.subtle.digest('SHA-256', buf);
-  return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2,'0')).join('');
-}
-
-function genSalt() {
-  const a = new Uint8Array(16);
-  crypto.getRandomValues(a);
-  return [...a].map(b => b.toString(16).padStart(2,'0')).join('');
-}
-
-async function hashWithSalt(pw, salt) {
-  return sha256Hex(salt + '::' + pw);
-}
-
-async function ensureSaltAndDefault() {
-  let salt = localStorage.getItem(LS.salt);
-  const stored = localStorage.getItem(LS.pwhash);
-  if (!salt && !stored) {
-    salt = genSalt();
-    save(LS.salt, salt);
-    save(LS.pwhash, await hashWithSalt('1', salt));
-    dlog('init: salt + default "1" created');
-  } else if (!salt && stored) {
-    dlog('legacy unsalted hash detected; will migrate on next successful unlock');
-  } else if (salt && !stored) {
-    save(LS.pwhash, await hashWithSalt('1', salt));
-    dlog('init: pwhash missing, reset to default "1"');
+function purgeLegacyKeys() {
+  let removed = 0;
+  for (const k of LEGACY_KEYS) {
+    if (localStorage.getItem(k) !== null) {
+      localStorage.removeItem(k);
+      removed++;
+    }
   }
-}
-
-async function resetToDefault() {
-  const salt = genSalt();
-  save(LS.salt, salt);
-  save(LS.pwhash, await hashWithSalt('1', salt));
-  clearFailures();
-  dlog('reset to default "1" with fresh salt');
-}
-
-async function setPassword(newPw) {
-  let salt = localStorage.getItem(LS.salt);
-  if (!salt) { salt = genSalt(); save(LS.salt, salt); }
-  save(LS.pwhash, await hashWithSalt(newPw, salt));
-  dlog('setPassword stored');
-}
-
-async function verifyPassword(pw) {
-  const stored = localStorage.getItem(LS.pwhash);
-  if (!stored) return false;
-  const salt = localStorage.getItem(LS.salt);
-  if (salt) {
-    return (await hashWithSalt(pw, salt)) === stored;
-  }
-  // Legacy: unsalted (v2.1.0 install)
-  const legacy = await sha256Hex(pw);
-  if (legacy === stored) {
-    // upgrade: salt + rehash
-    const newSalt = genSalt();
-    save(LS.salt, newSalt);
-    save(LS.pwhash, await hashWithSalt(pw, newSalt));
-    dlog('legacy password upgraded to salted');
-    return true;
-  }
-  return false;
-}
-
-// ---------- Rate limit ----------
-
-function getLockoutSeconds() {
-  const until = Number(localStorage.getItem(LS.lockout) || 0);
-  const rem = until - Date.now();
-  return rem > 0 ? Math.ceil(rem / 1000) : 0;
-}
-
-function recordFailure() {
-  const now = Date.now();
-  const arr = (JSON.parse(localStorage.getItem(LS.fails) || '[]')).filter(t => now - t < 60_000);
-  arr.push(now);
-  save(LS.fails, arr);
-  if (arr.length >= 5) {
-    save(LS.lockout, now + 30_000);
-    save(LS.fails, []);
-    return true;
-  }
-  return false;
-}
-
-function clearFailures() {
-  localStorage.removeItem(LS.fails);
-  localStorage.removeItem(LS.lockout);
+  if (removed) dlog(`purged ${removed} legacy keys`);
 }
 
 // ---------- Toast stack ----------
@@ -158,7 +73,6 @@ function toast(msg, type = 'info', ms = 4000) {
   el.className = `toast toast-${type}`;
   el.textContent = msg;
   el.addEventListener('click', () => dismiss());
-  // swipe-to-dismiss
   let startX = null;
   el.addEventListener('touchstart', e => { startX = e.touches[0].clientX; });
   el.addEventListener('touchmove',  e => {
@@ -245,10 +159,6 @@ async function gh(path, opts = {}) {
 const isNetworkError = e => !(e instanceof GhError) && (e instanceof TypeError || e?.name === 'TypeError');
 
 // ---------- Unified file I/O ----------
-//
-// Every read goes through fetchFile(); every write goes through sync().
-// A per-path mutex serializes writes so rapid clicks cannot race → no 409.
-// putFile always re-fetches fresh SHA right before PUT and retries on 409.
 
 async function fetchFile(name) {
   const path = FILES[name];
@@ -302,7 +212,6 @@ function runExclusive(key, fn) {
   return task;
 }
 
-// queue only on network error
 function enqueue(op) {
   state.queue.push(op);
   save(LS.queue, state.queue);
@@ -419,7 +328,6 @@ async function toggleDanas(sectionIdx, checked) {
   try { md = (await fetchFile('plan')).content; }
   catch (e) { toastErr('Ne mogu pročitati plan: ' + e.message); return; }
 
-  // only rewrite boxes inside ## Checklist section
   const re = /(##\s*Checklist\s*\n)([\s\S]*?)(?=\n##\s|$)/i;
   const m = md.match(re);
   if (!m) { toastErr('Checklist sekcija nije pronađena.'); return; }
@@ -610,20 +518,14 @@ async function loadZadaci() {
 
 async function addTask(text, tag) {
   dlog('addTask', tag, text);
-  // optimistic
   const base = parseZadaci(state.cache.zadaci || '');
   base.push({ line: -1, tag, text, _optimistic: true });
   renderZadaciList(base);
 
   try {
-    // ensure we have the latest file right before mutating
     let md;
-    try {
-      md = (await fetchFile('zadaci')).content;
-    } catch (e) {
-      if (e.status === 404) md = '## Aktivni zadaci\n';
-      else throw e;
-    }
+    try { md = (await fetchFile('zadaci')).content; }
+    catch (e) { if (e.status === 404) md = '## Aktivni zadaci\n'; else throw e; }
     let updated;
     const marker = /(## Aktivni zadaci\s*\n(?:<!--[^>]*-->\s*\n)?)/;
     if (marker.test(md)) updated = md.replace(marker, m => `${m}- [ ] ${tag} ${text}\n`);
@@ -718,38 +620,10 @@ function openDialog(id, msg) {
   if (!d) return;
   if (id === 'settings-dialog') {
     $('token-input').value = state.token;
-    $('pw-old').value = ''; $('pw-new').value = ''; $('pw-confirm').value = '';
-    $('pw-status').textContent = '';
     $('token-status').textContent = msg || '';
     $('app-version').textContent = APP_VERSION;
   }
   if (!d.open) d.showModal();
-}
-
-// ---------- Password change / reset ----------
-
-async function handlePwChange() {
-  const oldPw = $('pw-old').value;
-  const newPw = $('pw-new').value;
-  const conf  = $('pw-confirm').value;
-  const s = $('pw-status');
-  s.style.color = '';
-  if (!newPw) { s.style.color = 'var(--danger)'; s.textContent = 'nova šifra prazna'; return; }
-  if (newPw !== conf) { s.style.color = 'var(--danger)'; s.textContent = 'potvrda ne odgovara'; return; }
-  if (!await verifyPassword(oldPw)) { s.style.color = 'var(--danger)'; s.textContent = 'stara šifra pogrešna'; return; }
-  await setPassword(newPw);
-  if (!await verifyPassword(newPw)) { s.style.color = 'var(--danger)'; s.textContent = 'pohrana nije uspjela'; return; }
-  s.style.color = 'var(--success)';
-  s.textContent = 'šifra promijenjena';
-  $('pw-old').value = ''; $('pw-new').value = ''; $('pw-confirm').value = '';
-  setTimeout(() => s.textContent = '', 2500);
-}
-
-async function handlePwReset() {
-  if (!confirm('Resetirati šifru na default "1"? Ostali podaci ostaju.')) return;
-  await resetToDefault();
-  toastOk('Šifra resetirana na "1". Reload…');
-  setTimeout(() => location.reload(), 500);
 }
 
 // ---------- Token + maintenance ----------
@@ -766,77 +640,19 @@ function handleTokenSave() {
 
 function handleClearCache() {
   const tok = localStorage.getItem(LS.token);
-  const pw  = localStorage.getItem(LS.pwhash);
-  const salt = localStorage.getItem(LS.salt);
   localStorage.clear();
   sessionStorage.clear();
   if (tok) save(LS.token, tok);
-  if (pw)  save(LS.pwhash, pw);
-  if (salt) save(LS.salt, salt);
   state.queue = []; state.cache = {};
   toastOk('Cache obrisan');
 }
 
 function handleClearAll() {
-  if (!confirm('Obrisati token, šifru, salt i cache? (šifra se resetira na "1")')) return;
+  if (!confirm('Obrisati token i cache?')) return;
   localStorage.clear();
   sessionStorage.clear();
   state.token = ''; state.queue = []; state.cache = {};
   location.reload();
-}
-
-// ---------- Lock screen + rate limit ----------
-
-async function unlockApp() {
-  $('lock-screen').hidden = true;
-  $('app').hidden = false;
-  refreshDot();
-  clearFailures();
-  if (!state.token) {
-    openDialog('settings-dialog', 'Unesi GitHub token (prvi put).');
-  } else {
-    await Promise.all([loadPlan(), loadZadaci()]);
-    flushQueue();
-  }
-  startPolling();
-}
-
-async function handleLockSubmit(e) {
-  e.preventDefault();
-  const lock = getLockoutSeconds();
-  if (lock > 0) {
-    toastErr(`Lockout — pokušaj za ${lock}s`);
-    return;
-  }
-  const pw = $('lock-input').value;
-  const errEl = $('lock-error');
-  errEl.hidden = true;
-  try {
-    const ok = await verifyPassword(pw);
-    if (ok) { await unlockApp(); return; }
-    const locked = recordFailure();
-    $('lock-input').value = '';
-    $('lock-input').focus();
-    if (locked) {
-      errEl.textContent = 'Previše pokušaja, pokušaj za 30s.';
-      errEl.hidden = false;
-      toastErr('Previše pokušaja, pokušaj za 30s');
-    } else {
-      errEl.textContent = 'Pogrešna šifra';
-      errEl.hidden = false;
-    }
-  } catch (err) {
-    derr('unlock error', err);
-    errEl.textContent = 'Greška: ' + (err.message || err);
-    errEl.hidden = false;
-  }
-}
-
-async function initAuth() {
-  await ensureSaltAndDefault();
-  $('lock-screen').hidden = false;
-  $('app').hidden = true;
-  setTimeout(() => $('lock-input').focus(), 0);
 }
 
 // ---------- Polling ----------
@@ -859,8 +675,6 @@ function registerSW() {
 // ---------- Init ----------
 
 function bindEvents() {
-  $('lock-form').addEventListener('submit', handleLockSubmit);
-
   $('settings-btn').addEventListener('click', () => openDialog('settings-dialog'));
   $('refresh-btn').addEventListener('click', () => { loadPlan(); loadZadaci(); });
 
@@ -880,8 +694,6 @@ function bindEvents() {
     await addTask(text, tag);
   });
 
-  $('pw-save').addEventListener('click', handlePwChange);
-  $('pw-reset').addEventListener('click', handlePwReset);
   $('token-save').addEventListener('click', handleTokenSave);
   $('clear-cache').addEventListener('click', handleClearCache);
   $('clear-all').addEventListener('click', handleClearAll);
@@ -893,9 +705,21 @@ function bindEvents() {
   });
 }
 
+async function initApp() {
+  refreshDot();
+  if (!state.token) {
+    openDialog('settings-dialog', 'Unesi GitHub token (prvi put).');
+    return;
+  }
+  await Promise.all([loadPlan(), loadZadaci()]);
+  flushQueue();
+  startPolling();
+}
+
 function boot() {
+  purgeLegacyKeys();
   try { bindEvents(); } catch (e) { derr('bindEvents failed', e); }
-  initAuth().catch(e => derr('initAuth failed', e));
+  initApp().catch(e => derr('initApp failed', e));
   registerSW();
 }
 

@@ -10,17 +10,7 @@
 </head>
 <body>
 
-<!-- Password lock -->
-<div id="lock-screen" class="lock-screen" hidden>
-  <form id="lock-form" class="lock-box">
-    <h2>Moj raspored</h2>
-    <input id="lock-input" type="password" placeholder="Šifra" autocomplete="off" autofocus>
-    <button type="submit">Otključaj</button>
-    <p id="lock-error" class="lock-error" hidden></p>
-  </form>
-</div>
-
-<div id="app" hidden>
+<div id="app">
 
   <div id="progress-bar"></div>
 
@@ -111,15 +101,6 @@
     <h3>Postavke</h3>
 
     <fieldset>
-      <legend>Promjena šifre</legend>
-      <label>Stara šifra<input id="pw-old" type="password" autocomplete="current-password"></label>
-      <label>Nova šifra<input id="pw-new" type="password" autocomplete="new-password"></label>
-      <label>Potvrdi novu<input id="pw-confirm" type="password" autocomplete="new-password"></label>
-      <button type="button" id="pw-save" class="primary">Promijeni šifru</button>
-      <span class="muted small" id="pw-status"></span>
-    </fieldset>
-
-    <fieldset>
       <legend>GitHub token</legend>
       <label>Token<input id="token-input" type="password" autocomplete="off" placeholder="ghp_…"></label>
       <button type="button" id="token-save" class="primary">Ažuriraj token</button>
@@ -129,9 +110,8 @@
 
     <fieldset>
       <legend>Održavanje</legend>
-      <button type="button" id="pw-reset">Resetiraj šifru na default "1"</button>
       <button type="button" id="clear-cache">Obriši cache (token ostaje)</button>
-      <button type="button" id="clear-all">Obriši sve (token + šifra)</button>
+      <button type="button" id="clear-all">Obriši sve (token + cache)</button>
     </fieldset>
 
     <p class="muted small version">Verzija: <span id="app-version"></span></p>
@@ -143,6 +123,6 @@
 </dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
-<script src="app.js?v=2.2.0" defer></script>
+<script src="app.js?v=2.3.0" defer></script>
 </body>
 </html>

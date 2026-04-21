@@ -2,21 +2,24 @@
 
 Taggaj svaki zadatak jednim od: `@hitno`, `@danas`, `@sutra`, `@tjedan`, `@kasnije`.
 
-## Tagovi â znaÄenje
+## Tagovi Ã¢ÂÂ znaÃÂenje
 
-- **@hitno** â danas obavezno, bez obzira Å¡to se desi
-- **@danas** â danas ako stane
-- **@sutra** â sutraÅ¡nji prioritet
-- **@tjedan** â ovaj tjedan
-- **@kasnije** â backlog, razmisli tjedno
+- **@hitno** Ã¢ÂÂ danas obavezno, bez obzira ÃÂ¡to se desi
+- **@danas** Ã¢ÂÂ danas ako stane
+- **@sutra** Ã¢ÂÂ sutraÃÂ¡nji prioritet
+- **@tjedan** Ã¢ÂÂ ovaj tjedan
+- **@kasnije** Ã¢ÂÂ backlog, razmisli tjedno
 
 ## Primjeri
 
-- [ ] @tjedan uÄenje â zavrÅ¡it MAT poglavlje 4
-- [ ] @kasnije kuÄanski â pospremit sobu
+- [ ] @sutra biznis Ã¢ÂÂ poslati poruku klijentu X
+- [ ] @tjedan uÃÂenje Ã¢ÂÂ zavrÃÂ¡it MAT poglavlje 4
+- [ ] @kasnije kuÃÂanski Ã¢ÂÂ pospremit sobu
 
 ---
 
 ## Aktivni zadaci
 
-&lt;!-- dodaj ovdje --&gt;
+- [ ] @sutra sadasdasdasdkdskdwksd
+- [ ] @sutra smece
+&amp;lt;!-- dodaj ovdje --&amp;gt;

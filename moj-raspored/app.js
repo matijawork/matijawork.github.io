@@ -110,7 +110,6 @@ function authHeaders(extra = {}) {
     'Accept': 'application/vnd.github+json',
     'Authorization': `Bearer ${state.token}`,
     'X-GitHub-Api-Version': '2022-11-28',
-    'Cache-Control': 'no-cache',
     ...extra,
   };
 }

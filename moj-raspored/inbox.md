@@ -12,7 +12,6 @@ Taggaj svaki zadatak jednim od: `@hitno`, `@danas`, `@sutra`, `@tjedan`, `@kasni
 
 ## Primjeri
 
-- [ ] @kasnije kuÃÂÃÂÃÂÃÂanski ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ pospremit sobu
 
 ---
 

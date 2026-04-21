@@ -12,7 +12,6 @@ Taggaj svaki zadatak jednim od: `@hitno`, `@danas`, `@sutra`, `@tjedan`, `@kasni
 
 ## Primjeri
 
-- [ ] @sutra biznis â poslati poruku klijentu X
 - [ ] @tjedan uÄenje â zavrÅ¡it MAT poglavlje 4
 - [ ] @kasnije kuÄanski â pospremit sobu
 
@@ -20,5 +19,4 @@ Taggaj svaki zadatak jednim od: `@hitno`, `@danas`, `@sutra`, `@tjedan`, `@kasni
 
 ## Aktivni zadaci
 
-- [ ] @sutra sadasdas
 &lt;!-- dodaj ovdje --&gt;

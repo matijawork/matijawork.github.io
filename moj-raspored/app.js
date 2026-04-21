@@ -131,6 +131,7 @@ async function fetchFile(name) {
 
 // SINGLE WRITE PATH. NO SHA CACHE. Fresh GET immediately before each PUT attempt.
 async function ghWrite(path, content, message) {
+  console.log('[ghWrite] token len:', state.token?.length, 'path:', path, 'origin:', location.origin);
   if (!state.token) { const e = new Error('NO_TOKEN'); e.code = 'NO_TOKEN'; throw e; }
   const url = `https://api.github.com/repos/${FIXED_REPO}/contents/${path}`;
   let lastErr;
@@ -661,7 +662,11 @@ function setupScrollSpy() {
 // ---------- SW ----------
 
 function registerSW() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.getRegistrations().then(regs => {
+    regs.forEach(r => r.update());
+  }).catch(() => {});
 }
 
 // ---------- Init ----------

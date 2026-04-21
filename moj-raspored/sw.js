@@ -1,7 +1,7 @@
 // Moj raspored — service worker
 // v2: network-first za app shell (HTML/CSS/JS) → uvijek svježa verzija nakon deploya,
 // cache je samo offline fallback. Bump CACHE ime kad god mijenjaš strategiju.
-const CACHE = 'mr-v5';
+const CACHE = 'mr-v6';
 const SHELL = [
   './',
   './index.html',
